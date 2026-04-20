@@ -2,15 +2,18 @@
 #include <stdlib.h>
 #include <windows.h>
 
-const int MAX_GUESTS = 10;
+const int MAX_GUESTS = 5;
 const int PAINTINGS = 5;
-const int MAX_AT_PAINTING = 10;
+const int MAX_AT_PAINTING = 5;
 
 HANDLE sem_gallery;
 HANDLE sem_painting[PAINTINGS];
 HANDLE mutex_painting[PAINTINGS];
 
 int visitors_at_painting[PAINTINGS] = { 0 };
+
+int gallery_counter = 0;
+CRITICAL_SECTION cs_gallery;
 
 struct Visitor {
     int id;
@@ -24,15 +27,23 @@ DWORD WINAPI VisitorThread(PVOID pvParam) {
     const char* type = good ? "Good" : "Windy";
 
     WaitForSingleObject(sem_gallery, INFINITE);
-    printf("[%s %2d] Entered the gallery\n", type, id);
+
+    EnterCriticalSection(&cs_gallery);
+    gallery_counter++;
+    LeaveCriticalSection(&cs_gallery);
+
+    printf("[%s %2d] Entered the gallery. At the gallery right now: %d\n", type, id, gallery_counter);
 
     int order[PAINTINGS];
-    for (int i = 0; i < PAINTINGS; i++) order[i] = i;
-
+    for (int i = 0; i < PAINTINGS; i++) {
+        order[i] = i;
+    }
     if (!good) {
         for (int i = PAINTINGS - 1; i > 0; i--) {
             int j = rand() % (i + 1);
-            int tmp = order[i]; order[i] = order[j]; order[j] = tmp;
+            int tmp = order[i]; 
+            order[i] = order[j]; 
+            order[j] = tmp;
         }
     }
 
@@ -63,7 +74,14 @@ DWORD WINAPI VisitorThread(PVOID pvParam) {
         }
     }
 
-    printf("[%s %2d] Went away after seeing all the paintings.\n", type, id);
+    if (viewed == PAINTINGS) {
+        printf("[%s %2d] Went away after seeing all the paintings.\n", type, id);
+    }
+
+    EnterCriticalSection(&cs_gallery);
+    gallery_counter--;
+    LeaveCriticalSection(&cs_gallery);
+
     ReleaseSemaphore(sem_gallery, 1, NULL);
     delete p;
 
@@ -71,13 +89,14 @@ DWORD WINAPI VisitorThread(PVOID pvParam) {
 }
 
 int main() {
+    InitializeCriticalSection(&cs_gallery);
     sem_gallery = CreateSemaphore(NULL, MAX_GUESTS, MAX_GUESTS, NULL);
     for (int i = 0; i < PAINTINGS; i++) {
         sem_painting[i] = CreateSemaphore(NULL, MAX_AT_PAINTING, MAX_AT_PAINTING, NULL);
         mutex_painting[i] = CreateMutex(NULL, FALSE, NULL);
     }
 
-    const int TOTAL_VISITORS = 30;
+    const int TOTAL_VISITORS = 15;
     HANDLE threads[TOTAL_VISITORS];
     for (int i = 0; i < TOTAL_VISITORS; i++) {
         Visitor* p = new Visitor;
