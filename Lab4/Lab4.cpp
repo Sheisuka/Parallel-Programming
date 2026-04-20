@@ -1,61 +1,65 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <windows.h>
+#include <time.h>
 
-const int MAX_GUESTS = 10;
+const int MAX_GUESTS = 5;
 const int PAINTINGS = 5;
-const int MAX_AT_PAINTING = 10;
-const int TOTAL_VISITORS = 30;
+const int MAX_AT_PAINTING = 5;
 
-const char* SEM_GALLERY_NAME = "Gallery_Sem_Gallery";
-const char* SHARED_MEM_NAME = "Gallery_SharedMem";
-
-// Имена для sem_painting[i] и mutex_painting[i] строятся динамически:
-// "Gallery_Sem_Painting_0" .. "Gallery_Sem_Painting_4"
-// "Gallery_Mutex_Painting_0" .. "Gallery_Mutex_Painting_4"
-
-// Разделяемая память вместо глобального массива
-// (у каждого процесса своё адресное пространство)
-struct SharedData {
+struct SharedState {
     int visitors_at_painting[PAINTINGS];
+    int gallery_counter;
+    int initialized;
 };
 
-// =========================================================
-// Роль посетителя — запускается как отдельный процесс:
-// gallery.exe visitor <id> <good: 0|1>
-// =========================================================
-int run_visitor(int id, bool good) {
-    const char* type = good ? "Good" : "Windy";
+int main(int argc, char* argv[]) {
+    int id = atoi(argv[1]);
+    srand((unsigned)(id));
+    bool good = (rand() % 2 == 0);
+    const char* type = good ? "Good " : "Windy";
 
-    srand(GetTickCount() ^ (id * 1013));
-
-    // Открываем уже созданные главным процессом объекты
-    HANDLE sem_gallery = OpenSemaphore(SEMAPHORE_ALL_ACCESS, FALSE, SEM_GALLERY_NAME);
+    HANDLE sem_gallery = CreateSemaphoreA(NULL, MAX_GUESTS, MAX_GUESTS, "Gallery_SemGallery");
 
     HANDLE sem_painting[PAINTINGS];
     HANDLE mutex_painting[PAINTINGS];
+    char name[64];
     for (int i = 0; i < PAINTINGS; i++) {
-        char name[64];
-        sprintf(name, "Gallery_Sem_Painting_%d", i);
-        sem_painting[i] = OpenSemaphore(SEMAPHORE_ALL_ACCESS, FALSE, name);
-        sprintf(name, "Gallery_Mutex_Painting_%d", i);
-        mutex_painting[i] = OpenMutex(MUTEX_ALL_ACCESS, FALSE, name);
+        sprintf_s(name, "Gallery_SemPainting_%d", i);
+        sem_painting[i] = CreateSemaphoreA(NULL, MAX_AT_PAINTING, MAX_AT_PAINTING, name);
+        sprintf_s(name, "Gallery_MutexPainting_%d", i);
+        mutex_painting[i] = CreateMutexA(NULL, FALSE, name);
     }
+    HANDLE mutex_shared = CreateMutexA(NULL, FALSE, "Gallery_MutexShared");
 
-    HANDLE hMap = OpenFileMapping(FILE_MAP_ALL_ACCESS, FALSE, SHARED_MEM_NAME);
-    SharedData* shared = (SharedData*)MapViewOfFile(hMap, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SharedData));
+    HANDLE hMap = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, sizeof(SharedState), "Gallery_SharedState");
+    SharedState* state = (SharedState*)MapViewOfFile(hMap, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SharedState));
 
-    // Логика посетителя — один в один как VisitorThread из оригинала
+    WaitForSingleObject(mutex_shared, INFINITE);
+    if (!state->initialized) {
+        for (int i = 0; i < PAINTINGS; i++) {
+            state->visitors_at_painting[i] = 0;
+        }
+        state->gallery_counter = 0;
+        state->initialized = 1;
+    }
+    ReleaseMutex(mutex_shared);
+
+
     WaitForSingleObject(sem_gallery, INFINITE);
-    printf("[%s %2d] Entered the gallery\n", type, id);
+
+    WaitForSingleObject(mutex_shared, INFINITE);
+    ReleaseMutex(mutex_shared);
+    printf("[%s %2d] Entered the gallery. At the gallery right now: %d\n",type, id, ++state->gallery_counter);
 
     int order[PAINTINGS];
     for (int i = 0; i < PAINTINGS; i++) order[i] = i;
-
     if (!good) {
         for (int i = PAINTINGS - 1; i > 0; i--) {
             int j = rand() % (i + 1);
-            int tmp = order[i]; order[i] = order[j]; order[j] = tmp;
+            int tmp = order[i];
+            order[i] = order[j];
+            order[j] = tmp;
         }
     }
 
@@ -65,110 +69,40 @@ int run_visitor(int id, bool good) {
         WaitForSingleObject(sem_painting[pic], INFINITE);
 
         WaitForSingleObject(mutex_painting[pic], INFINITE);
-        shared->visitors_at_painting[pic]++;
-        printf("[%s %2d] is looking at the painting %d (it has %d visitors around it)\n",
-            type, id, pic, shared->visitors_at_painting[pic]);
+        printf("[%s %2d] is looking at the painting %d (it has %d visitors around it)\n", type, id, pic, ++state->visitors_at_painting[pic]);
         ReleaseMutex(mutex_painting[pic]);
 
         Sleep(500 + rand() % 500);
 
         WaitForSingleObject(mutex_painting[pic], INFINITE);
-        shared->visitors_at_painting[pic]--;
+        --state->visitors_at_painting[pic];
         printf("[%s %2d] Went away off the painting %d\n", type, id, pic);
         ReleaseMutex(mutex_painting[pic]);
 
         ReleaseSemaphore(sem_painting[pic], 1, NULL);
-        viewed++;
 
+        ++viewed;
         if (!good && (rand() % 3 == 0)) {
             printf("[%s %2d] Went away after seeing %d paintings.\n", type, id, viewed);
             break;
         }
     }
+    if (viewed == PAINTINGS) {
+        printf("[%s %2d] Went away after seeing all the paintings.\n", type, id);
+    }
 
-    printf("[%s %2d] Went away after seeing all the paintings.\n", type, id);
+    WaitForSingleObject(mutex_shared, INFINITE);
+    --state->gallery_counter;
+    ReleaseMutex(mutex_shared);
     ReleaseSemaphore(sem_gallery, 1, NULL);
 
-    UnmapViewOfFile(shared);
+    UnmapViewOfFile(state);
     CloseHandle(hMap);
-    CloseHandle(sem_gallery);
+    CloseHandle(mutex_shared);
     for (int i = 0; i < PAINTINGS; i++) {
         CloseHandle(sem_painting[i]);
         CloseHandle(mutex_painting[i]);
     }
-
-    return 0;
-}
-
-// =========================================================
-// Главный процесс — создаёт объекты и запускает дочерние
-// =========================================================
-int main(int argc, char* argv[]) {
-
-    // Если запущены как дочерний процесс — идём в роль посетителя
-    if (argc == 4 && strcmp(argv[1], "visitor") == 0) {
-        return run_visitor(atoi(argv[2]), atoi(argv[3]) != 0);
-    }
-
-    // --- Создаём именованные объекты синхронизации ---
-    HANDLE sem_gallery = CreateSemaphore(NULL, MAX_GUESTS, MAX_GUESTS, SEM_GALLERY_NAME);
-
-    HANDLE sem_painting[PAINTINGS];
-    HANDLE mutex_painting[PAINTINGS];
-    for (int i = 0; i < PAINTINGS; i++) {
-        char name[64];
-        sprintf(name, "Gallery_Sem_Painting_%d", i);
-        sem_painting[i] = CreateSemaphore(NULL, MAX_AT_PAINTING, MAX_AT_PAINTING, name);
-        sprintf(name, "Gallery_Mutex_Painting_%d", i);
-        mutex_painting[i] = CreateMutex(NULL, FALSE, name);
-    }
-
-    // --- Разделяемая память вместо глобального массива ---
-    HANDLE hMap = CreateFileMapping(INVALID_HANDLE_VALUE, NULL,
-        PAGE_READWRITE, 0, sizeof(SharedData), SHARED_MEM_NAME);
-    SharedData* shared = (SharedData*)MapViewOfFile(hMap, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SharedData));
-    memset(shared, 0, sizeof(SharedData));
-
-    // --- Запускаем процессы-посетители ---
-    char exe_path[MAX_PATH];
-    GetModuleFileNameA(NULL, exe_path, MAX_PATH);
-
-    srand(GetTickCount());
-
-    HANDLE procs[TOTAL_VISITORS];
-    for (int i = 0; i < TOTAL_VISITORS; i++) {
-        bool good = (rand() % 2 == 0);
-
-        char cmd[MAX_PATH + 64];
-        sprintf(cmd, "\"%s\" visitor %d %d", exe_path, i, (int)good);
-
-        STARTUPINFOA si = {};
-        si.cb = sizeof(si);
-        PROCESS_INFORMATION pi = {};
-
-        CreateProcessA(NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
-        CloseHandle(pi.hThread);
-        procs[i] = pi.hProcess;
-
-        Sleep(200 + rand() % 100);
-    }
-
-    // WaitForMultipleObjects берёт максимум 64 объекта,
-    // поэтому ждём по одному — для учебной задачи достаточно
-    for (int i = 0; i < TOTAL_VISITORS; i++) {
-        WaitForSingleObject(procs[i], INFINITE);
-        CloseHandle(procs[i]);
-    }
-
-    printf("The gallery has been closed.\n");
-
-    UnmapViewOfFile(shared);
-    CloseHandle(hMap);
     CloseHandle(sem_gallery);
-    for (int i = 0; i < PAINTINGS; i++) {
-        CloseHandle(sem_painting[i]);
-        CloseHandle(mutex_painting[i]);
-    }
-
     return 0;
 }
